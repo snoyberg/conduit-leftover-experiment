@@ -1,15 +1,15 @@
+{-# LANGUAGE TypeFamilies, EmptyDataDecls #-}
 {-# OPTIONS_GHC -Wall #-}
 module Conduit where
 
 import Control.Monad
 import Control.Applicative
---import Data.Void
 import Data.Monoid
 import Control.Monad.Trans.Writer
 import Control.Monad.Trans.Class
 import Test.Hspec
-import Prelude hiding (take)
-import Debug.Trace
+import Prelude hiding (take, id, (.))
+import Control.Category
 
 data Pipe i o d m r
     = Pure r
@@ -48,6 +48,26 @@ runPipe (Yield f _) = runPipe (f (Just ()))
       -> Pipe j k c m b
       -> Pipe i k c m a
 up >-> down = fuse (const up) down
+
+type family Stream a
+type family Result a
+
+data Pair i r
+
+type instance Stream (Pair i r) = i
+type instance Result (Pair i r) = r
+
+newtype ComposePipe m up down = ComposePipe (Maybe (Result down) -> Pipe (Stream up) (Stream down) (Result down) m (Result up))
+
+compose :: Monad m
+        => ComposePipe m b c
+        -> ComposePipe m a b
+        -> ComposePipe m a c
+compose (ComposePipe down) (ComposePipe up) = ComposePipe $ \mc -> up `fuse` down mc
+
+instance Monad m => Category (ComposePipe m) where
+    id = ComposePipe $ maybe idP Pure
+    ComposePipe down . ComposePipe up = ComposePipe $ \mc -> up `fuse` down mc
 
 fuse :: Monad m
      => (Maybe b -> Pipe i j b m a)
@@ -117,11 +137,11 @@ main = hspec $ do
                 `shouldBe` ((), [1..10 :: Int])
         it "idP middle1" $
             runPipeW (sourceList [1..] >-> idP >-> take 10 >-> awaitForever (lift . tell . return))
-                `shouldBe` ((), [1..10])
+                `shouldBe` ((), [1..10 :: Int])
         it "idP middle2" $
             runPipeW (sourceList [1..] >-> take 10 >-> idP >-> awaitForever (lift . tell . return))
-                `shouldBe` ((), [1..10])
+                `shouldBe` ((), [1..10 :: Int])
         it "idP back" $
             runPipeW (sourceList [1..] >-> take 10 >-> awaitForever (lift . tell . return) >-> idP)
-                `shouldBe` ((), [1..10])
+                `shouldBe` ((), [1..10 :: Int])
     return ()
