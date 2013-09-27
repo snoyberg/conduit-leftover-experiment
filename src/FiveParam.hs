@@ -154,21 +154,19 @@ foldM f =
   where
     loop r = awaitMaybe >>= maybe (return r) (\i -> lift (f r i) >>= loop)
 
-{-
-takeExactly :: Monad m => Int -> Conduit i i m ()
+takeExactly :: Monad m => Int -> Pipe i i r m ()
 takeExactly =
     loop
   where
-    loop 0 = clearCleanup
-    loop i = setCleanup (const $ drop i) >> await >>= maybe (return ()) (\x -> yield x >> loop (i - 1))
+    loop 0 = return ()
+    loop i = Yield (const $ drop i) (awaitMaybe >>= maybe (return ()) (\x -> yield x >> loop (i - 1))) Nothing
 
-drop :: Monad m => Int -> Conduit i o m ()
+drop :: Monad m => Int -> Pipe i o r m ()
 drop =
     loop
   where
     loop 0 = return ()
-    loop i = await >>= maybe (return ()) (const (loop (i - 1)))
--}
+    loop i = awaitMaybe >>= maybe (return ()) (const (loop (i - 1)))
 
 {-
 foo :: Monad m => Pipe i Int r r m ()
@@ -226,17 +224,17 @@ main = hspec $ do
                     leftover (2 :: Int)
                     leftover (1 :: Int)
                 consume) `shouldBe` [1..10]
-{-
     describe "cleanup" $ do
         describe "takeExactly" $ do
             it "undrained" $
-                runConduitI (mapM_ yield [1..10 :: Int] >-> do
+                runPipeI (mapM_ yield [1..10 :: Int] >-> do
                     takeExactly 5 >-> return ()
                     consume) `shouldBe` [6..10]
             it "drained" $
-                runConduitI (mapM_ yield [1..10 :: Int] >-> do
+                runPipeI (mapM_ yield [1..10 :: Int] >-> do
                     void $ takeExactly 5 >-> consume
                     consume) `shouldBe` [6..10]
+{-
     describe "finalizers" $ do
         it "left grouping" $ do
             runConduitW (
