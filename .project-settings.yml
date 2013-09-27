@@ -9,3 +9,11 @@ ghc-args: []
 modules:
   Main(src/Main.hs):
     filename: src/Main.hs
+  Sisu:
+    filename: src/Sisu.hs
+  FiveParam:
+    filename: src/FiveParam.hs
+  Sisu2:
+    filename: src/Sisu2.hs
+  Data.Conduit3:
+    filename: src/Data/Conduit3.hs
