@@ -9,12 +9,17 @@ import Data.Functor.Identity
 import Control.Monad.Trans.Writer
 import Data.Monoid
 import Prelude hiding (drop)
+import Data.Maybe (fromJust)
 
+data Result r a
+    = Next a
+    | Final r
+    | Empty
 data Pipe i o r m a
-    = Pure [i] (Either r a)
+    = Pure [i] (Result r a)
     | M (m (Pipe i o r m a))
     | Await (Maybe i -> Pipe i o r m a)
-    | Check ([o] -> Pipe i o r m a) (Pipe i o r m a)
+    | Check ([o] -> Maybe r -> Pipe i o r m a) (Pipe i o r m a)
     | Yield (Pipe i o r m a) o
 
 inject :: Monad m => [i] -> Pipe i o r m a -> Pipe i o r m a
@@ -22,7 +27,7 @@ inject [] p = p
 inject is (Pure is' e) = Pure (is' ++ is) e
 inject is (M m) = M (liftM (inject is) m)
 inject (i:is) (Await f) = inject is (f (Just i))
-inject is (Check close pipe) = Check (inject is . close) (inject is pipe)
+inject is (Check close pipe) = Check (\x -> inject is . close x) (inject is pipe)
 inject is (Yield pipe o) = Yield (inject is pipe) o
 
 instance Monad m => Functor (Pipe i o r m) where
@@ -31,48 +36,77 @@ instance Monad m => Applicative (Pipe i o r m) where
     pure = return
     (<*>) = ap
 instance Monad m => Monad (Pipe i o r m) where
-    return = Pure [] . Right
+    return = Pure [] . Next
     
-    Pure is (Left r) >>= _ = Pure is (Left r)
-    Pure is (Right a) >>= f = inject is (f a)
+    Pure is (Next a) >>= f = inject is (f a)
+    Pure is (Final r) >>= _ = Pure is (Final r)
+    Pure is Empty >>= _ = Pure is Empty
     M m >>= f = M (liftM (>>= f) m)
     Await p >>= f = Await (p >=> f)
-    Check close pipe >>= f = Check (close >=> f) (pipe >>= f)
+    Check close pipe >>= f = Check (\x -> close x >=> f) (pipe >>= f)
     Yield pipe o >>= f = Yield (pipe >>= f) o
 
 runPipeE :: Monad m
          => Pipe i o r m a
-         -> m (Either r a)
+         -> m (Result r a)
 runPipeE (Pure _ e) = return e
 runPipeE (M m) = m >>= runPipeE
 runPipeE (Yield pipe _) = runPipeE pipe
-runPipeE (Check close _) = runPipeE (close [])
+runPipeE (Check close _) = runPipeE (close [] Nothing)
 runPipeE (Await f) = runPipeE (f Nothing)
 
-runPipe :: Monad m => Pipe i o r m r -> m r
-runPipe = liftM (either id id) . runPipeE
+runPipe :: Monad m => Pipe i o r m r -> m (Maybe r)
+runPipe =
+    liftM go . runPipeE
+  where
+    go (Next a) = Just a
+    go (Final r) = Just r
+    go Empty = Nothing
+
+await :: Monad m => Pipe i o r m i
+await =
+    Check onClose (Await fromUp)
+  where
+    fromUp Nothing = Pure [] Empty
+    fromUp (Just i) = Pure [] (Next i)
+    onClose _ Nothing = Pure [] Empty
+    onClose _ (Just f) = Pure [] (Final f)
+
+awaitL :: Monad m => Pipe i i r m i
+awaitL =
+    Check onClose (Await fromUp)
+  where
+    fromUp Nothing = Pure [] Empty
+    fromUp (Just i) = Pure [] (Next i)
+    onClose is Nothing = Pure is Empty
+    onClose is (Just f) = Pure is (Final f)
 
 idP :: Monad m => Pipe i i r m ()
 idP =
-    Check (flip Pure (Right ())) (Await go)
+    Check onClose (Await go)
   where
-    go Nothing = Pure [] (Right ())
+    go Nothing = Pure [] (Next ())
     go (Just o) = Yield idP o
+    
+    onClose is = Pure is . onClose'
+    
+    onClose' Nothing = Next ()
+    onClose' (Just r) = Final r
 
 fuse :: Monad m
-     => Pipe a b () m ()
-     -> Pipe b c r m s
-     -> Pipe a c r m s
+     => Pipe a b r m x
+     -> Pipe b c r m y
+     -> Pipe a c r m y
 up `fuse` Pure is e = closeDown is e up
 up `fuse` M m = M (liftM (up `fuse`) m)
 up `fuse` Await p = takeUp p up
-up `fuse` Check close down = Check (fuse up . close) (up `fuse` down)
+up `fuse` Check close down = Check (\x -> fuse up . close x) (up `fuse` down)
 up `fuse` Yield down mc = Yield (up `fuse` down) mc
 
 takeUp :: Monad m
-       => (Maybe b -> Pipe b c r m s)
-       -> Pipe a b () m ()
-       -> Pipe a c r m s
+       => (Maybe b -> Pipe b c r m y)
+       -> Pipe a b r m x
+       -> Pipe a c r m y
 takeUp down (Pure as e) = Pure as e `fuse` down Nothing
 takeUp down (M m) = M (liftM (takeUp down) m)
 takeUp down (Await up) = Await (takeUp down . up)
@@ -81,22 +115,29 @@ takeUp down (Check _ up) = takeUp down up
 
 closeDown :: Monad m
           => [b]
-          -> Either r s
-          -> Pipe a b () m () -- FIXME try making first () an `r`
-          -> Pipe a c r m s
+          -> Result r y
+          -> Pipe a b r m x
+          -> Pipe a c r m y
 closeDown _ ers (Pure as _) = Pure as ers
 closeDown bs ers (M m) = M (liftM (closeDown bs ers) m)
 closeDown bs ers (Await p) = Await (closeDown bs ers . p)
-closeDown bs ers (Check close _) = closeDown [] ers (close bs)
+closeDown bs ers (Check close _) =
+    closeDown [] ers (close bs mr)
+  where
+    mr =
+        case ers of
+            Next _ -> Nothing
+            Final r -> Just r
+            Empty -> Nothing
 closeDown bs ers (Yield pipe _) = closeDown bs ers pipe
 
 -- BEGIN TESTS
 
 runPipeI :: Pipe i o r Identity r -> r
-runPipeI = runIdentity . runPipe
+runPipeI = fromJust . runIdentity . runPipe
 
 runPipeW :: Monoid w => Pipe i o r (Writer w) r -> (r, w)
-runPipeW = runWriter . runPipe
+runPipeW = runWriter . fmap fromJust . runPipe
 
 {-
 await :: Monad m => Conduit i o m (Maybe i)
@@ -120,19 +161,22 @@ sourceList (ds:dss) = Yield (\x -> if x then sourceList dss else sourceList []) 
 -}
 
 leftover :: Monad m => i -> Pipe i o r m ()
-leftover i = Pure [i] (Right ())
+leftover i = Pure [i] (Next ())
 
 setCleanup :: Monad m
            => m a
            -> Pipe i o r m a
            -> Pipe i o r m a
-setCleanup close =
+setCleanup _close =
+    error "setCleanup"
+    {-
     Check (const (lift close)) . go
   where
     go (M m) = M (liftM go m)
     go (Pure ls x) = lift close >> Pure ls x
     go (Await f) = Await (go . f)
     go (Check close' p) = Check undefined (go p)
+    -}
 
 {-
 setFinalizer :: Monad m => m () -> Conduit i o m ()
@@ -155,9 +199,9 @@ consume =
     loop front = awaitMaybe >>= maybe (return (front [])) (\i -> loop (front . (i:)))
 
 (>->) :: Monad m
-     => Pipe a b () m ()
-     -> Pipe b c r m s
-     -> Pipe a c r m s
+     => Pipe a b r m x
+     -> Pipe b c r m y
+     -> Pipe a c r m y
 (>->) = fuse
 
 foldM :: Monad m => (a -> i -> m a) -> a -> Pipe i o r m a
@@ -171,7 +215,7 @@ takeExactly =
     loop
   where
     loop 0 = return ()
-    loop i = Check (const $ drop i) (awaitMaybe >>= maybe (return ()) (\x -> yield x >> loop (i - 1)))
+    loop i = Check (\_ _ -> drop i) (awaitMaybe >>= maybe (return ()) (\x -> yield x >> loop (i - 1)))
 
 drop :: Monad m => Int -> Pipe i o r m ()
 drop =

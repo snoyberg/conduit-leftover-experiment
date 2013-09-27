@@ -9,6 +9,8 @@ ghc-args: []
 modules:
   Main(src/Main.hs):
     filename: src/Main.hs
+  Pipes:
+    filename: src/Pipes.hs
   Sisu:
     filename: src/Sisu.hs
   FiveParam:
