@@ -53,18 +53,7 @@ up >-> down = fuse (const up) down
 type family Stream a
 type family Result a
 
-data Pair i r
-
-type instance Stream (Pair i r) = i
-type instance Result (Pair i r) = r
-
 newtype ComposePipe m up down = ComposePipe (Maybe (Result down) -> Pipe (Stream up) (Stream down) (Result down) m (Result up))
-
-compose :: Monad m
-        => ComposePipe m b c
-        -> ComposePipe m a b
-        -> ComposePipe m a c
-compose (ComposePipe down) (ComposePipe up) = ComposePipe $ \mc -> up `fuse` down mc
 
 instance Monad m => Category (ComposePipe m) where
     id = ComposePipe $ maybe idP Pure
