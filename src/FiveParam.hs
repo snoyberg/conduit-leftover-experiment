@@ -7,7 +7,7 @@ import Test.Hspec
 import Data.Functor.Identity
 --import Data.Void
 import Control.Monad.Trans.Writer
---import Data.Monoid
+import Data.Monoid
 import Prelude hiding (drop)
 
 data Pipe i o r m a
@@ -95,10 +95,10 @@ closeDown bs ers (Yield pipe _) = closeDown bs ers pipe
 runPipeI :: Pipe i o r Identity r -> r
 runPipeI = runIdentity . runPipe
 
-{-
-runConduitW :: Monoid w => Conduit () Void (Writer w) r -> (r, w)
-runConduitW = runWriter . runConduit
+runPipeW :: Monoid w => Pipe i o r (Writer w) r -> (r, w)
+runPipeW = runWriter . runPipe
 
+{-
 await :: Monad m => Conduit i o m (Maybe i)
 await = Await (Pure [] . Just) (Pure [] Nothing)
 
@@ -122,10 +122,19 @@ sourceList (ds:dss) = Yield (\x -> if x then sourceList dss else sourceList []) 
 leftover :: Monad m => i -> Pipe i o r m ()
 leftover i = Pure [i] (Right ())
 
-{-
-setCleanup :: Monad m => ([o] -> Conduit i o m ()) -> Conduit i o m ()
-setCleanup = Cleanup (Pure [] ())
+setCleanup :: Monad m
+           => m a
+           -> Pipe i o r m a
+           -> Pipe i o r m a
+setCleanup close =
+    Check (const (lift close)) . go
+  where
+    go (M m) = M (liftM go m)
+    go (Pure ls x) = lift close >> Pure ls x
+    go (Await f) = Await (go . f)
+    go (Check close' p) = Check undefined (go p)
 
+{-
 setFinalizer :: Monad m => m () -> Conduit i o m ()
 setFinalizer = Cleanup (Pure [] ()) . const . lift
 
@@ -145,12 +154,10 @@ consume =
   where
     loop front = awaitMaybe >>= maybe (return (front [])) (\i -> loop (front . (i:)))
 
-{-
 (>->) :: Monad m
-     => Pipe bs br ba as ar m aa
-     -> Pipe cs cr ca bs br m ba
-     -> Pipe cs cr ca as ar m aa
--}
+     => Pipe a b () m ()
+     -> Pipe b c r m s
+     -> Pipe a c r m s
 (>->) = fuse
 
 foldM :: Monad m => (a -> i -> m a) -> a -> Pipe i o r m a
@@ -239,19 +246,22 @@ main = hspec $ do
                 runPipeI (mapM_ yield [1..10 :: Int] >-> do
                     void $ takeExactly 5 >-> consume
                     consume) `shouldBe` [6..10]
-{-
     describe "finalizers" $ do
+        it "stacked" $ do
+            runPipeW (
+                ((setCleanup (say "first1") (setCleanup (say "first2") (lift $ say "empty"))) >->
+                (awaitMaybe >> setCleanup (say "second") (lift $ say "not called"))) >->
+                return ()) `shouldBe` ((), ["empty", "first2", "first1", "second"])
         it "left grouping" $ do
-            runConduitW (
-                ((setCleanup (const $ say "first") >> say "not called") >->
-                (setCleanup (const $ say "second") >> say "not called")) >->
+            runPipeW (
+                ((setCleanup (say "first") (lift $ say "not called")) >->
+                (setCleanup (say "second") (lift $ say "not called"))) >->
                 return ()) `shouldBe` ((), ["second", "first"])
         it "right grouping" $ do
-            runConduitW (
-                (setCleanup (const $ say "first") >> say "not called") >->
-                ((setCleanup (const $ say "second") >> say "not called") >->
+            runPipeW (
+                (setCleanup (say "first") (lift $ say "not called")) >->
+                ((setCleanup (say "second") (lift $ say "not called")) >->
                 return ())) `shouldBe` ((), ["second", "first"])
--}
 
-say :: String -> Pipe i o r (Writer [String]) ()
-say = lift . tell . return
+say :: String -> Writer [String] ()
+say = tell . return
