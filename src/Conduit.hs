@@ -10,6 +10,7 @@ import Control.Monad.Trans.Class
 import Test.Hspec
 import Prelude hiding (take, id, (.))
 import Control.Category
+import Data.Functor.Identity
 
 data Pipe i o d m r
     = Pure r
@@ -101,6 +102,9 @@ downClosed b (Yield f _) = downClosed b (f (Just b))
 runPipeW :: Monoid w => Pipe i o () (Writer w) r -> (r, w)
 runPipeW = runWriter . runPipe
 
+runPipeI :: Pipe i o () Identity r -> r
+runPipeI = runIdentity . runPipe
+
 await :: Monad m => Pipe i o d m (Maybe i)
 await = Await Pure
 
@@ -126,6 +130,18 @@ take :: Monad m => Int -> Pipe o o r m ()
 take 0 = return ()
 take count = await >>= maybe (return ()) (yield >=> maybe (take (count - 1)) (const $ return ()))
 
+consume :: Monad m => Pipe i o r m [i]
+consume =
+    go id
+  where
+    go front = await >>= maybe (return (front [])) (\i -> go (front . (i:)))
+
+(>+>) :: Monad m
+      => Pipe i j b m ()
+      -> Pipe j k c m b
+      -> Pipe i k c m b
+up >+> down = (up >> stop) >-> down
+
 main :: IO ()
 main = hspec $ do
     describe "basics" $ do
@@ -144,4 +160,20 @@ main = hspec $ do
         it "idP back" $
             runPipeW (sourceList [1..] >-> take 10 >-> awaitForever (lift . tell . return) >-> idP)
                 `shouldBe` ((), [1..10 :: Int])
+    describe "consume" $ do
+        it "no idP" $
+            runPipeI (sourceList [1 :: Int ..] >+> take 10 >+> consume)
+                `shouldBe` [1..10]
+        it "idP front" $
+            runPipeI (idP >-> sourceList [1 :: Int ..] >+> take 10 >+> consume)
+                `shouldBe` [1..10]
+        it "idP middle1" $
+            runPipeI (sourceList [1 :: Int ..] >+> idP >-> take 10 >+> consume)
+                `shouldBe` [1..10]
+        it "idP middle2" $
+            runPipeI (sourceList [1 :: Int ..] >+> take 10 >+> idP >-> consume)
+                `shouldBe` [1..10]
+        it "idP back" $
+            runPipeI (sourceList [1 :: Int ..] >+> take 10 >+> consume >-> idP)
+                `shouldBe` [1..10]
     return ()
